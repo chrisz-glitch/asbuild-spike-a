@@ -22,7 +22,7 @@ def cmd_score(argv) -> int:
         print("usage: python -m app score <job.json>", file=sys.stderr)
         return 2
     try:
-        print(f"score: {score_job(argv[0])}")
+        print(f"Score={score_job(argv[0])}")
         return 0
     except FileNotFoundError:
         print(f"no such file: {argv[0]}", file=sys.stderr)
