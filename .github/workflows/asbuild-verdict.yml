@@ -1,0 +1,142 @@
+# AsBuild — the TRUSTED half. Runs from main, never checks out or runs pull-request code, gives the verdict,
+# merges PROVEN work with the record in the merge commit, and raises the alarm on unaudited pushes.
+#
+# Trust rules that T1/T4/T5 verify:
+#  * everything about the PR comes from the EVENT PAYLOAD (workflow_run.head_sha) and the API, never from
+#    files in the artifact (out/meta.json is attacker-controlled: informational only);
+#  * the artifact is parsed, never executed; XML goes through junit_classify.py / lock_check.py (size-capped);
+#  * only same-repository PRs authored by ASBUILD_BUILDER_LOGIN are judged; anything else gets a plain note;
+#  * an owner's approval is handled HERE, from main, via the wake job + workflow_run (never on a
+#    pull_request_review trigger in this file, which would run the PR's copy of the workflow).
+#
+# >>> SPIKE: replace "SPIKE COMMAND" with the spike's verdict program; keep the structure. <<<
+
+name: asbuild-verdict
+
+on:
+  workflow_run:
+    workflows: [asbuild-test]
+    types: [completed]
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  issues: write
+  actions: read
+
+jobs:
+  verdict:
+    if: github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.event, 'pull_request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      TRIGGER: ${{ github.event.workflow_run.event }}        # pull_request | pull_request_review
+      CHECK_NAME: ${{ vars.ASBUILD_CHECK_NAME || 'AsBuild' }}
+      BUILDER: ${{ vars.ASBUILD_BUILDER_LOGIN }}
+      OWNERS: ${{ vars.ASBUILD_OWNERS }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v5          # MAIN, never the PR
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the pull request from the trusted head SHA
+        id: pr
+        run: |
+          gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            --jq --arg repo "$REPO" '[.[] | select(.head.repo.full_name==$repo and .state=="open")][0]' > pr.json
+          if [ ! -s pr.json ] || [ "$(cat pr.json)" = "null" ]; then echo "no open same-repo PR for $HEAD_SHA"; echo "number=" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "number=$(jq -r .number pr.json)" >> "$GITHUB_OUTPUT"
+          echo "author=$(jq -r .user.login pr.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Other authors get a note, never a verdict (T5)
+        if: steps.pr.outputs.number != '' && steps.pr.outputs.author != env.BUILDER
+        run: |
+          gh pr comment ${{ steps.pr.outputs.number }} --repo "$REPO" \
+            --body "AsBuild judges only pull requests opened by the builder account. This one is not judged or merged."
+
+      # ---------------- approval path (TRIGGER == pull_request_review): no evidence needed ----------------
+      - name: Owner approval of this exact commit -> merge a WAITING FOR YOU verdict (T4)
+        if: steps.pr.outputs.number != '' && steps.pr.outputs.author == env.BUILDER && env.TRIGGER == 'pull_request_review'
+        run: |
+          approved=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}/reviews" --paginate \
+            --jq --arg sha "$HEAD_SHA" --arg owners "$OWNERS" '
+              ($owners | split(",")) as $o
+              | [ .[] | select(.commit_id==$sha and .state=="APPROVED" and ((.user.login) as $u | $o | index($u) != null)) ] | length')
+          latest=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+            --jq --arg n "$CHECK_NAME" '[.check_runs[] | select(.name==$n and .app.slug=="github-actions" and .status=="completed")] | sort_by(.completed_at) | last | .conclusion')
+          echo "approvals by owners on $HEAD_SHA: $approved; latest AsBuild conclusion: $latest"
+          if [ "${approved:-0}" -ge 1 ] && [ "$latest" = "action_required" ]; then
+            state=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}" --jq .mergeable_state)
+            [ "$state" = "clean" ] || { echo "not up to date with main ($state)"; exit 0; }
+            gh api -X PUT "repos/$REPO/pulls/${{ steps.pr.outputs.number }}/merge" -f merge_method=merge -f sha="$HEAD_SHA" \
+              -f commit_title="AsBuild WAITING FOR YOU, approved by owner: merge #${{ steps.pr.outputs.number }}" \
+              -f commit_message="Approved on GitHub for commit $HEAD_SHA. Verdict run: $RUN_URL"
+          fi
+
+      # ---------------- verdict path (TRIGGER == pull_request) ----------------
+      - uses: actions/download-artifact@v4
+        if: steps.pr.outputs.number != '' && steps.pr.outputs.author == env.BUILDER && env.TRIGGER == 'pull_request'
+        with:
+          name: asbuild-evidence
+          path: evidence/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Compute the verdict (C1..C5, diff-cover, gitleaks, lock, scope, strikes)
+        if: steps.pr.outputs.number != '' && steps.pr.outputs.author == env.BUILDER && env.TRIGGER == 'pull_request'
+        id: verdict
+        run: |
+          pip install --quiet defusedxml
+          # SPIKE COMMAND: python <spike>/verdict.py --evidence evidence/ --head "$HEAD_SHA" --pr ${{ steps.pr.outputs.number }} \
+          #                  --owners "$OWNERS" --out verdict.json --summary summary.md --record record.md
+          echo "SPIKE COMMAND HERE"
+          echo '{"verdict":"NOT PROVEN","reason":"spike command missing"}' > verdict.json
+          printf 'AsBuild could not run: spike command missing.\n\n```json\n%s\n```\n' "$(cat verdict.json)" > summary.md
+          echo "verdict=$(jq -r .verdict verdict.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Post the check run (the only thing a green tick may mean)
+        if: steps.verdict.outcome == 'success'
+        run: |
+          case "${{ steps.verdict.outputs.verdict }}" in
+            PROVEN) c=success ;; "WAITING FOR YOU") c=action_required ;; *) c=failure ;; esac
+          jq -n --arg name "$CHECK_NAME" --arg sha "$HEAD_SHA" --arg c "$c" --arg url "$RUN_URL" \
+                --arg title "AsBuild: ${{ steps.verdict.outputs.verdict }}" --rawfile summary summary.md \
+            '{name:$name, head_sha:$sha, status:"completed", conclusion:$c, details_url:$url,
+              output:{title:$title, summary:$summary}}' \
+          | gh api -X POST "repos/$REPO/check-runs" --input -
+
+      - name: Merge PROVEN work with the record in the merge commit
+        if: steps.verdict.outputs.verdict == 'PROVEN'
+        run: |
+          state=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}" --jq .mergeable_state)
+          [ "$state" = "clean" ] || { echo "not up to date with main ($state): the builder updates the branch"; exit 0; }
+          gh api -X PUT "repos/$REPO/pulls/${{ steps.pr.outputs.number }}/merge" \
+            -f merge_method=merge -f sha="$HEAD_SHA" \
+            -f commit_title="AsBuild PROVEN: merge #${{ steps.pr.outputs.number }}" \
+            -F commit_message=@record.md
+
+  alarm:
+    # A push to main that the merge step did not make. Pushes made with GITHUB_TOKEN do not start workflows,
+    # so this job only ever runs for somebody else's push (S5/T8).
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          gh issue create --repo ${{ github.repository }} --title "Unaudited change on main" \
+            --body "Commit ${{ github.sha }} was pushed to main by ${{ github.actor }} outside the AsBuild merge step."

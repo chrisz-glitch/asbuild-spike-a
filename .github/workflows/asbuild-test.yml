@@ -1,0 +1,85 @@
+# AsBuild — the UNTRUSTED half. Runs the pull request's code with read-only rights and uploads evidence.
+# Trigger: pull_request (never pull_request_target). pull_request_review only "wakes" the trusted half:
+# an owner's approval runs the tiny `wake` job, whose completion starts asbuild-verdict from main (T4 ext).
+#
+# >>> SPIKE: replace the "SPIKE COMMAND" steps with the spike's own programs. Keep everything else. <<<
+# Pin every action by commit SHA before this file goes into the product repository:
+#   gh api repos/actions/checkout/git/ref/tags/v5 --jq .object.sha   (then use actions/checkout@<sha>  # v5)
+
+name: asbuild-test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: asbuild-test-${{ github.event.pull_request.number }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  evidence:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install --quiet -r requirements.txt
+
+      - name: Full suite on the PR (C1, diff-cover input)
+        run: |
+          mkdir -p out
+          python -m pytest --continue-on-collection-errors -o junit_family=xunit2 \
+            --junitxml=out/pr.xml --cov=. --cov-report=xml:out/coverage.xml
+
+      - name: Acceptance suite, hardened (no conftest, no plugin autoload)
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pytest tests/acceptance --noconftest -p no:cacheprovider \
+            --continue-on-collection-errors -o junit_family=xunit2 --junitxml=out/acceptance.xml
+
+      - name: C3 fail-without — the PR's acceptance files laid over main, one file at a time
+        # SPIKE COMMAND: the spike's overlay program; it must write one JUnit XML per acceptance file into out/c3/
+        run: |
+          echo "SPIKE COMMAND HERE: python <spike>/c3_overlay.py --base origin/${{ github.base_ref }} --out out/c3/"
+          mkdir -p out/c3
+
+      - name: Changed-lines coverage (diff-cover) and secrets (gitleaks)
+        # SPIKE COMMAND: diff-cover out/coverage.xml --compare-branch=origin/${{ github.base_ref }} --json-report out/diffcover.json
+        # SPIKE COMMAND: gitleaks git --no-banner --report-path out/gitleaks.json .   (or the gitleaks action)
+        run: echo "SPIKE COMMANDS HERE"
+
+      - name: Record what ran (informational only; the trusted side never trusts this file)
+        run: |
+          printf '{"event":"%s","pr_head":"%s"}\n' "${{ github.event_name }}" "${{ github.event.pull_request.head.sha }}" > out/meta.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asbuild-evidence
+          path: out/
+          retention-days: 7
+
+  wake:
+    # An owner's review changes nothing in the code; this job exists only so that workflow_run fires from main.
+    if: github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "review ${{ github.event.review.state }} by ${{ github.event.review.user.login }} on ${{ github.event.review.commit_id }}"
