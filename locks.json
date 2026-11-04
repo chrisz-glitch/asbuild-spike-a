@@ -1,0 +1,12 @@
+{
+  "created": "2026-11-04T22:51:06+00:00",
+  "files": {
+    "tests/acceptance/S1/test_S1_score.py": {
+      "sha256": "12152b9584ac99c7c7e820cbdefd6634d5ff034208ffc4dba50945894c7307e5",
+      "tests": [
+        "test_E1_S1_AC1_score_prints_integer_and_exits_zero",
+        "test_E1_S1_AC2_missing_file_exits_two_and_says_so"
+      ]
+    }
+  }
+}

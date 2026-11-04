@@ -56,7 +56,7 @@ jobs:
         id: pr
         run: |
           gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
-            --jq --arg repo "$REPO" '[.[] | select(.head.repo.full_name==$repo and .state=="open")][0]' > pr.json
+            | jq --arg repo "$REPO" '[.[] | select(.head.repo.full_name==$repo and .state=="open")][0]' > pr.json
           if [ ! -s pr.json ] || [ "$(cat pr.json)" = "null" ]; then echo "no open same-repo PR for $HEAD_SHA"; echo "number=" >> "$GITHUB_OUTPUT"; exit 0; fi
           echo "number=$(jq -r .number pr.json)" >> "$GITHUB_OUTPUT"
           echo "author=$(jq -r .user.login pr.json)" >> "$GITHUB_OUTPUT"
@@ -71,15 +71,18 @@ jobs:
       - name: Owner approval of this exact commit -> merge a WAITING FOR YOU verdict (T4)
         if: steps.pr.outputs.number != '' && steps.pr.outputs.author == env.BUILDER && env.TRIGGER == 'pull_request_review'
         run: |
-          approved=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}/reviews" --paginate \
-            --jq --arg sha "$HEAD_SHA" --arg owners "$OWNERS" '
+          approved=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}/reviews?per_page=100" \
+            | jq --arg sha "$HEAD_SHA" --arg owners "$OWNERS" '
               ($owners | split(",")) as $o
               | [ .[] | select(.commit_id==$sha and .state=="APPROVED" and ((.user.login) as $u | $o | index($u) != null)) ] | length')
           latest=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
-            --jq --arg n "$CHECK_NAME" '[.check_runs[] | select(.name==$n and .app.slug=="github-actions" and .status=="completed")] | sort_by(.completed_at) | last | .conclusion')
+            | jq -r --arg n "$CHECK_NAME" '[.check_runs[] | select(.name==$n and .app.slug=="github-actions" and .status=="completed")] | sort_by(.completed_at) | last | .conclusion')
           echo "approvals by owners on $HEAD_SHA: $approved; latest AsBuild conclusion: $latest"
           if [ "${approved:-0}" -ge 1 ] && [ "$latest" = "action_required" ]; then
-            state=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}" --jq .mergeable_state)
+            for i in 1 2 3 4 5 6; do
+              state=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}" --jq .mergeable_state)
+              [ "$state" = "clean" ] && break; sleep 10
+            done
             [ "$state" = "clean" ] || { echo "not up to date with main ($state)"; exit 0; }
             gh api -X PUT "repos/$REPO/pulls/${{ steps.pr.outputs.number }}/merge" -f merge_method=merge -f sha="$HEAD_SHA" \
               -f commit_title="AsBuild WAITING FOR YOU, approved by owner: merge #${{ steps.pr.outputs.number }}" \
@@ -100,12 +103,20 @@ jobs:
         id: verdict
         run: |
           pip install --quiet defusedxml
-          # SPIKE COMMAND: python <spike>/verdict.py --evidence evidence/ --head "$HEAD_SHA" --pr ${{ steps.pr.outputs.number }} \
-          #                  --owners "$OWNERS" --out verdict.json --summary summary.md --record record.md
-          echo "SPIKE COMMAND HERE"
-          echo '{"verdict":"NOT PROVEN","reason":"spike command missing"}' > verdict.json
-          printf 'AsBuild could not run: spike command missing.\n\n```json\n%s\n```\n' "$(cat verdict.json)" > summary.md
+          python auditor/verdict.py --evidence evidence/ --head "$HEAD_SHA" --pr ${{ steps.pr.outputs.number }} \
+            --owners "$OWNERS" --out verdict.json --summary summary.md --record record.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
           echo "verdict=$(jq -r .verdict verdict.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.verdict.outcome == 'success'
+        with:
+          name: asbuild-verdict
+          path: |
+            verdict.json
+            summary.md
+            record.md
+          retention-days: 7
 
       - name: Post the check run (the only thing a green tick may mean)
         if: steps.verdict.outcome == 'success'
@@ -121,7 +132,10 @@ jobs:
       - name: Merge PROVEN work with the record in the merge commit
         if: steps.verdict.outputs.verdict == 'PROVEN'
         run: |
-          state=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}" --jq .mergeable_state)
+          for i in 1 2 3 4 5 6; do   # mergeable_state is recomputed a few seconds after the check run is posted
+            state=$(gh api "repos/$REPO/pulls/${{ steps.pr.outputs.number }}" --jq .mergeable_state)
+            [ "$state" = "clean" ] && break; sleep 10
+          done
           [ "$state" = "clean" ] || { echo "not up to date with main ($state): the builder updates the branch"; exit 0; }
           gh api -X PUT "repos/$REPO/pulls/${{ steps.pr.outputs.number }}/merge" \
             -f merge_method=merge -f sha="$HEAD_SHA" \

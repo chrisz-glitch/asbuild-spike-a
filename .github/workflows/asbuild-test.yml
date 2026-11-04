@@ -56,15 +56,13 @@ jobs:
             --continue-on-collection-errors -o junit_family=xunit2 --junitxml=out/acceptance.xml
 
       - name: C3 fail-without — the PR's acceptance files laid over main, one file at a time
-        # SPIKE COMMAND: the spike's overlay program; it must write one JUnit XML per acceptance file into out/c3/
-        run: |
-          echo "SPIKE COMMAND HERE: python <spike>/c3_overlay.py --base origin/${{ github.base_ref }} --out out/c3/"
-          mkdir -p out/c3
+        # The spike's G3 overlay (auditor/auditor.py) via auditor/c3_overlay.py: one JUnit XML per acceptance file
+        run: python auditor/c3_overlay.py --base origin/${{ github.base_ref }} --out out/c3
 
       - name: Changed-lines coverage (diff-cover) and secrets (gitleaks)
         # SPIKE COMMAND: diff-cover out/coverage.xml --compare-branch=origin/${{ github.base_ref }} --json-report out/diffcover.json
         # SPIKE COMMAND: gitleaks git --no-banner --report-path out/gitleaks.json .   (or the gitleaks action)
-        run: echo "SPIKE COMMANDS HERE"
+        run: echo "not wired in step 0 - the spike has no diff-cover or gitleaks step"
 
       - name: Record what ran (informational only; the trusted side never trusts this file)
         run: |
