@@ -43,12 +43,14 @@ jobs:
         run: python -m pip install --quiet -r requirements.txt
 
       - name: Full suite on the PR (C1, diff-cover input)
+        continue-on-error: true   # failing tests are evidence; the trusted verdict decides, the upload must still run
         run: |
           mkdir -p out
           python -m pytest --continue-on-collection-errors -o junit_family=xunit2 \
             --junitxml=out/pr.xml --cov=. --cov-report=xml:out/coverage.xml
 
       - name: Acceptance suite, hardened (no conftest, no plugin autoload)
+        continue-on-error: true
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
