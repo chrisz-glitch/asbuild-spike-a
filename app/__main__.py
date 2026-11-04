@@ -1,9 +1,9 @@
-"""The app's command-line surface. This file exists on main BEFORE any story is built, so every
-acceptance test can call `python -m app <command> ...` and fail on main by ASSERTION (exit code 2,
-"unknown command") rather than by ImportError. Stories register commands in COMMANDS."""
+"""The app's command-line surface. Stories register commands in COMMANDS."""
 import sys
 
-COMMANDS = {}
+from app.scoring import cmd_score
+
+COMMANDS = {"score": cmd_score}
 
 
 def main(argv):
