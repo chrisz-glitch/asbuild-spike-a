@@ -1,11 +1,22 @@
-"""S1 scoring (seeded WRONG on purpose for T24a)."""
-import json, pathlib, sys
+"""S1 scoring: `python -m app score <job.json>` prints `score: N`."""
+import json
+import pathlib
+import sys
+
 
 def score_job(path):
-    job = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))   # FileNotFoundError escapes -> traceback, exit 1
+    job = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     text = str(job.get("description", "")).lower()
     return sum(1 for k in job.get("keywords", []) if str(k).lower() in text)
 
+
 def cmd_score(argv):
-    print(f"Score={score_job(argv[0])}")                                # wrong format for S1-C1
+    if len(argv) != 1:
+        print("usage: python -m app score <job.json>", file=sys.stderr)
+        return 2
+    path = argv[0]
+    if not pathlib.Path(path).is_file():
+        print(f"no such file: {path}", file=sys.stderr)
+        return 2
+    print(f"score: {score_job(path)}")
     return 0
