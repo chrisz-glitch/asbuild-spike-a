@@ -3,7 +3,9 @@ acceptance test can call `python -m app <command> ...` and fail on main by ASSER
 "unknown command") rather than by ImportError. Stories register commands in COMMANDS."""
 import sys
 
-COMMANDS = {}
+from app.scoring import score_command
+
+COMMANDS = {"score": score_command}
 
 
 def main(argv):
